@@ -8,7 +8,9 @@
 > both names if you reuse the write-up.
 >
 > Repository contents: `README.md` (full write-up below), `boot.cmd.nvme` (final boot script),
-> `scripts/` (SPI image builder / flasher, bootscr installer — sanitized, variables at the top).
+> `scripts/` (SPI image builder / flasher, bootscr installer — sanitized, variables at the top),
+> **`hdmi-troubleshooting.md` + `hdmi-kiosk/`** — why the HDMI shows "No signal" on this BSP
+> (it is not your boot chain) and an on-demand weston emergency console that fixes it.
 
 **TL;DR** — My OPi 4A boots fully without a microSD card: BROM → SPI NOR (boot0_spinor + stock u-boot) → kernel/initrd/rootfs all on NVMe. Everything built from publicly available Xunlong blobs on the stock 1.0.4 vendor stack (u-boot 2018.07 + BSP 5.15). Two non-obvious pitfalls cost most of the evening; both have clean fixes.
 

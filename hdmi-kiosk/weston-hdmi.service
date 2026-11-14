@@ -1,0 +1,28 @@
+[Unit]
+Description=Emergency HDMI terminal (weston kiosk, on-demand)
+Documentation=man:weston(1)
+After=multi-user.target
+
+[Service]
+Type=simple
+# seatd (root daemon) grants DRM + VT to this unprivileged weston; it manages the
+# VT switch itself, so NO TTYPath/PAMName here (that combo makes weston die
+# silently in <1s; plain no-ctty process works, verified 2026-11-15).
+# Requirements: seatd.service running (`seatd -g video`), User in `video` group,
+# loginctl enable-linger for the user (XDG_RUNTIME_DIR must always exist).
+User=<USER>
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Environment=HOME=/home/<USER>
+Environment=XDG_RUNTIME_DIR=/run/user/<UID>
+Environment=LANG=C.UTF-8
+TimeoutStartSec=60
+ExecStart=/usr/bin/weston --backend=drm --shell=kiosk-shell.so --config=/etc/weston-hdmi.ini --idle-time=0 --socket=hdmi --log=/tmp/weston-hdmi.log
+ExecStartPost=/bin/sh -c '/usr/local/bin/hdmi-term-client.sh </dev/null >/dev/null 2>&1 &'
+KillMode=control-group
+Restart=no
+
+[Install]
+# deliberately NOT enabled: manual start only
+WantedBy=multi-user.target
