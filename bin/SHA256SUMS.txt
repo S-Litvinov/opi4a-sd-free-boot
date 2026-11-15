@@ -1,0 +1,2 @@
+5eadc2a8ecc6cbcda9f57be26ea604fb366025efd29a84b5bcef995f961c742d *boot0_spinor.fex
+31ec3781a5a9986560ef983fdb8f0b693e0f2222a0af6d3a6239f2421da30983 *spi-image-16m-prp-1.0.4.bin

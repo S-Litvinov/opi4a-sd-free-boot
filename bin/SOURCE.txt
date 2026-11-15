@@ -1,0 +1,12 @@
+boot0_spinor.fex  - official Allwinner/Xunlong boot0 for SPI NOR boot of sun55iw3,
+                    taken unmodified from orangepi-xunlong/orangepi-build, branch next:
+                    external/packages/pack-uboot/sun55iw3/bin/boot0_spinor.fex
+spi-image-16m-prp-1.0.4.bin
+                    = stock Orange Pi 4A image 1.0.4 SPI layout (boot0_spinor + boot_package
+                    carved from that image's SD boot area) with the 40-byte PRP fix applied
+                    (uboot-prp-fix/patch_nvme_prp_bin.py). Provenance: identical (byte-for-byte)
+                    to the image that cold-boots our board without an SD card, except the
+                    NORPARAM block at 0xf800 (board-local DRAM training cache, removed here;
+                    boot0 regenerates it on first boot).
+                    Use only for boards running the 1.0.4 vendor stack; install-sd-free.sh
+                    prefers building this image from YOUR OWN SD card.
