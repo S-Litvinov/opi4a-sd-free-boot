@@ -23,7 +23,26 @@ MODE="${1:-check}"
 log() { printf '\n== %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
-ask()  { [ "$MODE" = install ] || return 0; printf '%s [y/N] ' "$1"; read -r a; [ "$a" = y ]; }
+# NOTE: read the answer from the TERMINAL, never from stdin.
+# The documented one-liner is  curl ... | sudo bash -s -- --install  -> stdin IS this
+# script, so a plain `read` swallows the next line of the script instead of the user's
+# answer (verified: it consumed the following `dd` line, then aborted with "nothing written").
+ask()  {
+    [ "$MODE" = install ] || return 0
+    printf '%s [y/N] ' "$1"
+    local a=""
+    if [ -r /dev/tty ]; then
+        read -r a < /dev/tty || a=""
+    else
+        echo >&2
+        echo "ERROR: no terminal available to answer the confirmation prompt." >&2
+        echo "       Download the script to a file and run it from there:" >&2
+        echo "         curl -fsSL -o install-sd-free.sh <url>" >&2
+        echo "         sudo bash install-sd-free.sh --install" >&2
+        return 1
+    fi
+    [ "$a" = y ] || [ "$a" = Y ]
+}
 
 # ------------------------------------------------------------------ verify mode
 if [ "$MODE" = verify ]; then
@@ -72,9 +91,22 @@ fi
 
 SPI_CUR=$(dd if=/dev/mtd0 bs=64k status=none | sha256sum | cut -d' ' -f1)
 SPI_MAGIC=$(dd if=/dev/mtd0 bs=1 count=1 status=none | od -An -tx1 | tr -d ' \n')
-if [ "$SPI_CUR" = 31ec3781a5a9986560ef983fdb8f0b693e0f2222a0af6d3a6239f2421da30983 ]; then
+# The 0xf800-0xffff NORPARAM block holds boot0's board-local DRAM training cache
+# ("bootpara"), written by boot0 on the first boot of THIS board. It is the only
+# board-specific part of the image, so ignore it when comparing against the
+# released artifact (which ships it erased, so any other board trains its own).
+SPI_CUR_NORPARAM=$(python3 -c '
+import hashlib, sys
+try:
+    d = bytearray(open("/dev/mtd0", "rb").read())
+except OSError:
+    sys.exit(0)
+d[0xf800:0x10000] = b"\xff" * 0x800
+print(hashlib.sha256(bytes(d)).hexdigest())' 2>/dev/null || true)
+if [ "$SPI_CUR" = 31ec3781a5a9986560ef983fdb8f0b693e0f2222a0af6d3a6239f2421da30983 ] ||
+   [ "$SPI_CUR_NORPARAM" = 31ec3781a5a9986560ef983fdb8f0b693e0f2222a0af6d3a6239f2421da30983 ]; then
     echo "SPI already contains this exact PRP-fixed image (1.0.4 prebuilt)"
-elif [ "$SPI_MAGIC" = ee ]; then
+elif [ "$SPI_MAGIC" = de ] || [ "$SPI_MAGIC" = ee ]; then   # 0xde = Allwinner eGON.BT0 header
     echo "SPI currently holds a bootloader (sha $SPI_CUR...) — it will be backed up before overwrite"
 elif [ "$SPI_MAGIC" = ff ]; then
     echo "SPI is empty/factory"
@@ -125,7 +157,10 @@ if [ "$BUILT" = prebuilt ]; then
     VER=$([ -r /etc/orangepi-release ] && sed -n 's/^VERSION=//p' /etc/orangepi-release || echo unknown)
     [ "$VER" = "1.0.4" ] || echo "WARNING: prebuilt image is for the stock 1.0.4 vendor stack; you report VERSION=$VER"
     ask "fall back to the prebuilt PRP-fixed image for the 1.0.4 stack?" || die "aborted"
-    sha256sum -c --ignore-missing <(grep spi-image-16m-prp bin/SHA256SUMS.txt) || die "prebuilt sha mismatch"
+    # SHA256SUMS.txt lists BARE file names while the images live in bin/ -> run sha256sum
+    # from inside bin/, otherwise --ignore-missing skips the file and sha256sum exits 1
+    # ("no file was verified"), so the check never passes.
+    ( cd bin && sha256sum -c --ignore-missing <(grep spi-image-16m-prp SHA256SUMS.txt) ) || die "prebuilt sha mismatch"
     cp bin/spi-image-16m-prp-1.0.4.bin "$IMG"
 fi
 FINAL_SHA=$(sha256sum "$IMG" | cut -d' ' -f1)
