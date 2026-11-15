@@ -25,8 +25,6 @@ die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 ask()  { [ "$MODE" = install ] || return 0; printf '%s [y/N] ' "$1"; read -r a; [ "$a" = y ]; }
 
-[ "$(id -u)" = 0 ] || die "run with sudo (curl ... | sudo bash)"
-
 # ------------------------------------------------------------------ verify mode
 if [ "$MODE" = verify ]; then
     cmd=$(cat /proc/cmdline)
@@ -40,6 +38,7 @@ if [ "$MODE" = verify ]; then
 fi
 
 # ------------------------------------------------------------------ checks
+[ "$(id -u)" = 0 ] || die "run with sudo (curl ... | sudo bash)"
 log "checks"
 grep -qa 'sun55iw3' /proc/device-tree/compatible 2>/dev/null || \
     die "this does not look like an Orange Pi 4A (T527) — compatible: $(cat /proc/device-tree/compatible 2>/dev/null | tr -d '\0')"
