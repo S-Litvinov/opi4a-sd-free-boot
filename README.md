@@ -7,14 +7,45 @@
 > the debugging, the human did the soldering-adjacent parts. Corrections and PRs welcome; please keep
 > both names if you reuse the write-up.
 >
-> Repository contents: `README.md` (full write-up below), `boot.cmd.nvme` (final boot script),
+> Repository contents: `README.md` (full write-up below), **`install-sd-free.sh` (one-command
+> installer — see next section)**, `boot.cmd.nvme` (final boot script),
 > `scripts/` (SPI image builder / flasher, bootscr installer — sanitized, variables at the top),
+> `bin/` (prebuilt SPI image + vendor boot0_spinor, with provenance notes),
 > **`hdmi-troubleshooting.md` + `hdmi-kiosk/`** — why the HDMI shows "No signal" on this BSP
 > (it is not your boot chain) and an on-demand weston emergency console that fixes it.
 
 **TL;DR** — My OPi 4A boots fully without a microSD card: BROM → SPI NOR (boot0_spinor + stock u-boot) → kernel/initrd/rootfs all on NVMe. Everything built from publicly available Xunlong blobs on the stock 1.0.4 vendor stack (u-boot 2018.07 + BSP 5.15). Two non-obvious pitfalls cost most of the evening; both have clean fixes.
 
 Target audience: anyone who has read "SPI doesn't work for now" / "boot ROM only loads from SD/eMMC" around this SoC family and stopped there. It does work, today, without the gated Allwinner SDK.
+
+---
+
+## Do it in one command (for the impatient)
+
+Prerequisite: your OS already lives on the NVMe (`findmnt /` shows `/dev/nvme...`). If it is
+still on the SD card, move it first with the vendor tool (`nand-sata-install`), reboot and
+re-check. Keep a way to watch the serial console if you can (3 pins by the power button).
+
+```bash
+# 1. dry-run, writes nothing — shows exactly what it would do:
+curl -fsSL https://raw.githubusercontent.com/S-Litvinov/opi4a-sd-free-boot/main/install-sd-free.sh | sudo bash
+
+# 2. apply (backs up SPI NOR first — it prints the backup path, copy it to your PC):
+curl -fsSL https://raw.githubusercontent.com/S-Litvinov/opi4a-sd-free-boot/main/install-sd-free.sh | sudo bash -s -- --install
+
+# 3. power off, remove the microSD, wait 10 s, power on, then confirm:
+curl -fsSL https://raw.githubusercontent.com/S-Litvinov/opi4a-sd-free-boot/main/install-sd-free.sh | sudo bash -s -- verify
+```
+
+What `--install` does: assembles the SPI image **from your own SD card's boot_package** (so the
+BSP version always matches) + Xunlong's `boot0_spinor`, binary-applies the u-boot PRP fix
+(`uboot-prp-fix/`) to it, backs up and flashes SPI NOR with readback verification, marks the SD
+mounts in `/etc/fstab` as `nofail` (so a removed card can never stall boot), and installs the
+NVMe boot script (v4) on NVMe + as an SD fallback. Undo is one `dd` from the printed backup
+file, and your SD card still boots normally afterwards. If the pattern-patcher does not
+recognize your u-boot build, it offers the prebuilt image for the stock 1.0.4 stack (`bin/`).
+
+The rest of this file explains **why** each piece is needed — read it if anything misbehaves.
 
 ---
 
