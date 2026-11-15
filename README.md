@@ -39,11 +39,38 @@ mw.l 0x22100014 0      # NVMe register CC = 0 (clears EN)
 
 After this the kernel initializes the exact same drive normally (`nvme0n1: p1`, queues, HMB...). This single write is the difference between "NVMe boot is impossible" and it working. (On manual `bootm` you also need `fdt addr <dtb>` + `fdt resize 65536` or you get `FDT_ERR_NOSPACE` when injecting bootargs.)
 
-### 2. NVMe silently fails LARGE reads for the first ~20 seconds after power-on
+### 2. `ERROR: status = 13` on large NVMe reads — PRP bug in the 2018 u-boot driver
 
-Symptom: u-boot auto-boot can read a 434-byte file from NVMe but fails on the 25 MB uImage with `ERROR: status = 13, phase = 1 ... fs_devread read error - block` (completion timeout). Interrupt autoboot, wait ~30 s, load the same file — 3/3 success, `crc32` stable. So it is neither DRAM nor the bootloader: the drive (SMI-based, vendor id 0x126f) simply is not ready for big DMA transfers right after PERST. Any "SPI boot is broken / kernel panics from SPI" reports I had seen are very likely this.
+> **Correction (Nov 15).** The first version of this write-up blamed this on the SSD needing ~20 s to
+> "settle" after power-on, and recommended `sleep 8`. That was wrong — sorry for the bad epidemiology.
+> With the real fix below, a cold boot reads 24 MB in 69 ms on the *first* attempt, with zero sleeps.
 
-**Fix**: a settle delay + one retry in the boot script (below).
+`status = 13` is printed in hex. **0x13 is the NVMe generic command status "PRP Offset Invalid"** —
+and it is a *host-side* bug, not the drive. The 2018-generation u-boot NVMe driver takes its 512-byte
+PRP list pool from plain `malloc()`. A PRP list may not cross a 4 KiB memory-page boundary, so when
+the malloc'd pool straddles a page, every read command needing more entries than fit before the
+boundary gets rejected by the SSD (~220 KB at this drive's MDTS = 256 KB). Small files (1.7 KB
+boot.scr) sail through; the 24 MB uImage dies. Where the pool lands depends on the heap history —
+SD card in/out, HDMI plugged/unplugged, manual vs distro scan — which is exactly why the same board
+"boots with the card, boot-loops without it", and why it flips between days. This also explains most
+of the "T527/A523 NVMe works in Linux but not in u-boot" reports across the ecosystem.
+
+A/B/C proof from the u-boot console: pointing `dev->prp_pool` at `0x4ffffe10` (straddling) makes a
+256 KB read fail twice with `status = 13` while a 252 KB read still passes — the exact PRP-entry
+boundary; moving the same pointer to a page-aligned address fixes everything, deterministically.
+
+Upstream fixed this in 2019 — U-Boot commit `b21dcebfa6` ("nvme: Fix PRP Offset Invalid"). Xunlong's
+BSP u-boot (2018.05-t527, built Apr 2025) predates it. Two ways to live with that:
+
+**A. Runtime hot-fix, no reflashing** — boot script **v4** (see `boot.cmd.nvme`, marker `spi-boot-v4`):
+finds the driver's `struct nvme_dev` in the heap by its BAR0 pointer signature and repoints
+`prp_pool` to a page-aligned scratch page; if the struct cannot be located, falls back to loading
+kernel/initrd in 8 KiB chunks (two pages per command need no PRP list at all — slow but bulletproof).
+The fix runs before any large read; the kernel cmdline reports what happened
+(`spiboot.prp=<pool page offset> spiboot.fix=<0/1>`).
+
+**B. The real cure — binary-apply the upstream patch to the shipped u-boot and reflash SPI
+NOR** — no toolchain needed. See `uboot-prp-fix/patch_nvme_prp_bin.py` and the last section.
 
 ## SPI NOR layout — what BROM actually accepts (verified on hardware)
 
@@ -80,35 +107,30 @@ cmp spi-image-16m.bin /tmp/rb.bin && echo SPI-VERIFY-OK
 
 Back up the SPI contents (`dd if=/dev/mtd0 ...`) before you start. Recovery is trivial anyway: BROM tries SD first — keep your old card as a bootable spare, erase SPI with `flash_erase`/dd-FF whenever.
 
-## The boot script (NVMe), v2 — save as boot.cmd, compile, place on NVMe **and** SD
+## The boot script (NVMe), v4 — save as boot.cmd, compile, place on NVMe **and** SD
+
+Full script in this repo as `boot.cmd.nvme` (v4). Skeleton with the parts that matter:
 
 ```
-setenv bootargs "root=UUID=<NVME_ROOT_UUID> rootwait rootfstype=ext4 \
-earlycon=uart8250,mmio32,0x02500000 console=ttyAS0,115200 console=tty1 \
-consoleblank=0 loglevel=4 clk_ignore_unused swiotlb=65536 net.ifnames=0 \
-cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1"
+echo NVMe boot v4
+if itest.s x${devtype} == xnvme; then echo nvme-scanned-by-distro; else pci enum; nvme scan; fi
+# --- PRP hot-fix: find struct nvme_dev (signature = BAR0 pointers) walking down from
+#     the admin CQ register, repoint dev->prp_pool to a page-aligned scratch page ---
+setexpr.l a *0x22100030
+...
+while itest ${a} != ${e}; do setexpr a ${a} - 4; if itest.l *${a} == 0x22101000; then ...; fi; done
+mw.l ${field} 0x48000000          # dev->prp_pool = page-aligned
+setenv fixed 1
 
-echo NVMe boot v2
-pci enum
-nvme scan
-sleep 8
-if load nvme 0:1 0x41000000 /boot/uImage; then echo kern-ok; else sleep 10; load nvme 0:1 0x41000000 /boot/uImage; fi
-if load nvme 0:1 0x43000000 /boot/dtb/allwinner/sun55i-t527-orangepi-4a.dtb; then
-        if load nvme 0:1 0x46000000 /boot/uInitrd; then
-                mw.l 0x22100014 0
-                fdt addr 0x43000000
-                fdt resize 65536
-                bootm 0x41000000 0x46000000:${filesize} 0x43000000
-        fi
-fi
+# per file: fast load if the fix applied, else 8K-chunk fallback (no PRP lists ever)
+load nvme 0:1 ${addr} ${file}     # or chunked load ${file} 0x2000 <pos>
 
-echo NVMe boot FAILED - falling back to SD boot.scr.orig
-mmc dev 1
-if load mmc 1 0x49000000 boot.scr.orig; then
-        source 0x49000000
-fi
-reset
+mw.l 0x22100014 0                 # NVMe CC.EN = 0 before bootm (pitfall #1)
+fdt addr 0x43000000; fdt resize 65536
+bootm 0x41000000 0x46000000:${filesize} 0x43000000
 ```
+
+Every statement is one line on purpose, so it can be pasted into the serial console line by line.
 
 Compile and deploy:
 
@@ -126,18 +148,69 @@ Notes:
 
 ## Verified result (cold boot, no card, first try)
 
+Final state — SPI image with the binary PRP fix (see next section), boot script v4 as safety net:
+
 ```
 [152]HELLO! BOOT0 is starting!
-[7367]spinor id is: 20 41 18, read cmd: 03
-[7376]The size of toc is 1d4000.
-[8015]Jump to second Boot.
-U-Boot 2018.07-orangepi ...
-NVMe boot v2
-kern-ok
-...
+[08.074]workmode = 0,storage type = 3          <- storage type 3 = SPI NOR
+No MMC device available                        <- no card anywhere
+Scanning nvme 0:1...
+3566 bytes read in 0 ms                        <- GPT + boot.scr read fine
+NVMe boot v4
+prp-pool bbe5e000 moved to 0x48000000          <- pool offset is 0x000: memalign worked,
+                                                  the hot-fix now relocates an already-good pool
+24877632 bytes read in 70 ms (338.9 MiB/s)     <- kernel: first try, full speed, zero sleeps
+13358802 bytes read in 38 ms (335.3 MiB/s)
+Verifying Checksum ... OK  (x2)
+Starting kernel ...
 <your-hostname> login:
-root: /dev/nvme0n1p1, no /dev/mmcblk* present, HA up ~60 s
 ```
+
+Kernel cmdline ends with `spi-boot-v4 spiboot.prp=0 spiboot.fix=1`; root is `/dev/nvme0n1p1`,
+no `/dev/mmcblk*` exists, HA is up in ~60 s.
+
+## The cure: binary-apply the upstream PRP fix (no rebuild)
+
+A full rebuild of Xunlong's `v2018.05-t527` branch is possible on the board itself
+(in-tree, `make CROSS_COMPILE=arm-linux-gnueabi-` as a make *argument*, `KCFLAGS=-Wno-error`
+for gcc-13, `DTC=/usr/bin/dtc`) — but the resulting image sat silent on our board: boot0
+reached "Jump to second Boot" and nothing printed after it. The BSP packaging has private
+touches (the packer injects PMU regulator values into the appended dtb that are not in the
+git tree), so chasing the delta across toolchain generations looked like the wrong trade.
+
+The binary patch applies the same semantics as upstream `b21dcebfa6` directly to the
+shipped payload, **40 bytes, two in-place rewrites, no code cave**
+(`uboot-prp-fix/patch_nvme_prp_bin.py <in.bin> <out.bin>`):
+
+- `nvme_probe`: `malloc(512)` → `memalign(4096, 512)` (u-boot's own dlmalloc), storing
+  `prp_pool` + `prp_entry_num` with one `strd`; the original NULL-check error path is kept.
+- `nvme_setup_prps` realloc path: `malloc(nprps<<3)` → `memalign(4096, nprps<<3)`. The
+  preceding `free()` stays valid — dlmalloc's `free()` accepts `memalign()` pointers.
+  (Minor casualty: the out-of-memory `printf` loses 4 bytes and is dropped; `-ENOMEM`
+  is still returned.)
+
+Sites are found by byte patterns (probe alloc, realloc sequence, dlmalloc `memalign`
+prologue) and the injected branches are re-encoded for whatever addresses your dump has,
+so it works against *your* board's SPI image, not just ours.
+
+How it was validated before touching flash:
+
+1. **Emulation** — Unicorn, ARM/Thumb: both patched sites executed against instrumented
+   `memalign/free/printf`, including the allocation-failure paths (correct branch targets,
+   `-ENOMEM` intact).
+2. **Live hot-patch, zero writes** — from the serial console of a *known-good* boot the
+   exact patch bytes were written into the relocated u-boot image in RAM, caches evicted
+   with a big `crc32`, then real NVMe loads ran through the patched driver
+   (`uImage` 24 MB CRC-exact, forced realloc path via shrinking `dev->prp_entry_num`,
+   heap sane afterwards), and the board was `reset` back to normal boot.
+3. Only then: flash the patched image (backup first, readback verify — `flash-spi.sh`)
+   and cold-boot without the card (log above).
+
+One packaging gotcha worth knowing: boot0 caches its DRAM training into a NORPARAM block
+(`bootpara` magic at `0xf800`) on early boots, so a fresh SPI dump no longer hashes equal
+to the image you flashed — always diff and re-base on the *live* dump, and keep a dump of
+every state (the flash script does this for you).
+
 
 ## Caveats / not covered
 
